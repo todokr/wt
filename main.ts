@@ -205,6 +205,20 @@ function truncate(s: string, max: number): string {
   return oneLine.length > max ? oneLine.slice(0, max - 1) + "…" : oneLine;
 }
 
+// term の最初の出現箇所が見えるように、その周辺を切り出して max 文字に収める
+function excerptAround(s: string, term: string, max: number): string {
+  const oneLine = s.replace(/\s+/g, " ").trim();
+  const idx = oneLine.toLowerCase().indexOf(term.toLowerCase());
+  if (oneLine.length <= max || idx < 0) return truncate(oneLine, max);
+  const start = Math.max(
+    0,
+    Math.min(idx - Math.floor(max / 3), oneLine.length - max),
+  );
+  const slice = oneLine.slice(start, start + max);
+  return (start > 0 ? "…" : "") + slice +
+    (start + max < oneLine.length ? "…" : "");
+}
+
 // term の出現箇所を黄背景でハイライト。restore はハイライト後に復帰する SGR (dim など)
 function highlight(s: string, term: string | undefined, restore = ""): string {
   if (!term) return s;
@@ -250,6 +264,32 @@ async function printPreview(worktreePath: string, term?: string) {
     console.log(`${dim}(このパスの Claude Code セッション履歴なし)${reset}`);
     return;
   }
+
+  // 検索語があるときは、検索対象と同じ範囲から一致エントリだけを表示する
+  // (通常表示の各8件に一致箇所が含まれず「ヒットしたのに見えない」のを防ぐ)
+  if (term) {
+    const kw = term.toLowerCase();
+    const hits = history.filter((e) => e.text.toLowerCase().includes(kw));
+    console.log("");
+    console.log(`${bold}── 「${term}」を含む履歴 (${hits.length}件) ──${reset}`);
+    for (const e of hits) {
+      const time = `${dim}${relativeTime(e.timestamp).padStart(5)}${reset}`;
+      if (e.kind === "prompt") {
+        console.log(
+          `${time} ${yellow}💬${reset} ${highlight(excerptAround(e.text, term, 200), term)}`,
+        );
+      } else {
+        console.log(
+          `${time} ${green}$${reset} ${dim}${highlight(excerptAround(e.text, term, 160), term, dim)}${reset}`,
+        );
+      }
+    }
+    if (hits.length === 0) {
+      console.log(`${dim}(直近 ${history.length} エントリに一致なし)${reset}`);
+    }
+    return;
+  }
+
   const prompts = history.filter((e) => e.kind === "prompt").slice(0, 8);
   const commands = history.filter((e) => e.kind === "command").slice(0, 8);
 
