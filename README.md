@@ -29,16 +29,20 @@ eval "$(wt init zsh)"
 git リポジトリ内で:
 
 ```sh
-wt
+wt              # 全 worktree から選択
+wt <キーワード>  # Claude との会話にキーワードを含む worktree に絞って選択
 ```
 
 fzf が起動し、カレントリポジトリの worktree 一覧が表示される。
+キーワード指定時はプレビュー内の該当箇所がハイライトされる。
 
 | キー | 動作 |
 | --- | --- |
 | `Enter` | 選択した worktree に cd |
+| 文字入力 | branch 名・パスでファジー絞り込み（プレビューでは入力がハイライトされる） |
+| `ctrl-f` | 入力中の文字列で **会話内容** を検索して一覧を絞り込み |
 | `ctrl-d` | 選択した worktree を削除（確認プロンプトあり。dirty なら強制削除を再確認） |
-| `ctrl-r` | 一覧を再読み込み |
+| `ctrl-r` | 全件表示に戻す |
 | `Esc` / `ctrl-c` | キャンセル |
 
 プレビューには以下が表示される:
@@ -50,11 +54,13 @@ fzf が起動し、カレントリポジトリの worktree 一覧が表示され
 ### サブコマンド
 
 ```sh
-wt list            # worktree 一覧を TSV 出力
-wt preview <path>  # 指定 worktree のプレビューを出力
-wt rm <path>       # 指定 worktree を削除
-wt init zsh|bash   # cd 連携用シェル関数を出力
+wt list [キーワード]         # worktree 一覧を TSV 出力 (キーワードで会話内容フィルタ)
+wt preview <path> [キーワード] # 指定 worktree のプレビューを出力
+wt rm <path>                 # 指定 worktree を削除
+wt init zsh|bash             # cd 連携用シェル関数を出力
 ```
+
+※ サブコマンド名 (`list` / `preview` / `rm` / `init`) と同名のキーワードでは検索できない。
 
 ## 開発・リリース（メンテナ向け）
 

@@ -2,7 +2,8 @@
 //
 // Usage:
 //   wt              fzf で worktree を選択 (Enter: パスを stdout に出力 / ctrl-d: 削除)
-//   wt list         worktree 一覧を TSV で出力 (内部用: fzf の reload にも使う)
+//   wt <keyword>    Claude Code の会話履歴に keyword を含む worktree に絞って fzf 起動
+//   wt list [kw]    worktree 一覧を TSV で出力 (内部用: fzf の reload にも使う)
 //   wt preview <p>  worktree のプレビュー (git 状態 + Claude Code 履歴) を出力 (内部用)
 //   wt rm <p>       worktree を削除 (確認プロンプトあり)
 //   wt init zsh     cd 連携用のシェル関数を出力 (.zshrc で eval する)
@@ -92,8 +93,24 @@ async function getWorktrees(): Promise<Worktree[]> {
   return worktrees;
 }
 
-async function printList() {
-  const worktrees = await getWorktrees();
+// keyword を Claude Code の会話履歴 (指示 + コマンド) に含む worktree だけを残す
+async function filterByHistory(
+  worktrees: Worktree[],
+  keyword: string,
+): Promise<Worktree[]> {
+  const kw = keyword.toLowerCase();
+  const matches = await Promise.all(
+    worktrees.map(async (wt) => {
+      const history = await collectHistory(wt.path);
+      return history.some((e) => e.text.toLowerCase().includes(kw));
+    }),
+  );
+  return worktrees.filter((_, i) => matches[i]);
+}
+
+async function printList(keyword?: string) {
+  let worktrees = await getWorktrees();
+  if (keyword) worktrees = await filterByHistory(worktrees, keyword);
   const home = Deno.env.get("HOME") ?? "";
   for (const wt of worktrees) {
     const display = wt.path.startsWith(home)
@@ -188,7 +205,17 @@ function truncate(s: string, max: number): string {
   return oneLine.length > max ? oneLine.slice(0, max - 1) + "…" : oneLine;
 }
 
-async function printPreview(worktreePath: string) {
+// term の出現箇所を黄背景でハイライト。restore はハイライト後に復帰する SGR (dim など)
+function highlight(s: string, term: string | undefined, restore = ""): string {
+  if (!term) return s;
+  const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return s.replace(
+    new RegExp(escaped, "gi"),
+    (m) => `\x1b[30;43m${m}\x1b[0m${restore}`,
+  );
+}
+
+async function printPreview(worktreePath: string, term?: string) {
   const bold = "\x1b[1m", dim = "\x1b[2m", cyan = "\x1b[36m",
     yellow = "\x1b[33m", green = "\x1b[32m", reset = "\x1b[0m";
 
@@ -230,7 +257,7 @@ async function printPreview(worktreePath: string) {
   console.log(`${bold}── Claude への指示 ──${reset}`);
   for (const e of prompts) {
     const time = `${dim}${relativeTime(e.timestamp).padStart(5)}${reset}`;
-    console.log(`${time} ${yellow}💬${reset} ${truncate(e.text, 200)}`);
+    console.log(`${time} ${yellow}💬${reset} ${highlight(truncate(e.text, 200), term)}`);
   }
   if (prompts.length === 0) console.log(`${dim}(なし)${reset}`);
 
@@ -238,7 +265,9 @@ async function printPreview(worktreePath: string) {
   console.log(`${bold}── 実行されたコマンド ──${reset}`);
   for (const e of commands) {
     const time = `${dim}${relativeTime(e.timestamp).padStart(5)}${reset}`;
-    console.log(`${time} ${green}$${reset} ${dim}${truncate(e.text, 160)}${reset}`);
+    console.log(
+      `${time} ${green}$${reset} ${dim}${highlight(truncate(e.text, 160), term, dim)}${reset}`,
+    );
   }
   if (commands.length === 0) console.log(`${dim}(なし)${reset}`);
 }
@@ -284,18 +313,25 @@ async function removeWorktree(worktreePath: string) {
 
 // ---------- interactive (fzf) ----------
 
-async function interactive() {
-  const worktrees = await getWorktrees();
+async function interactive(keyword?: string) {
+  let worktrees = await getWorktrees();
   if (worktrees.length === 0) {
     console.error("worktree がありません");
     Deno.exit(1);
+  }
+  if (keyword) {
+    worktrees = await filterByHistory(worktrees, keyword);
+    if (worktrees.length === 0) {
+      console.error(`会話履歴に「${keyword}」を含む worktree はありません`);
+      Deno.exit(1);
+    }
   }
 
   const invoke = selfInvoke();
 
   let fzf: Deno.ChildProcess;
   try {
-    fzf = spawnFzf(invoke);
+    fzf = spawnFzf(invoke, keyword);
   } catch (e) {
     if (e instanceof Deno.errors.NotFound) {
       console.error("fzf が見つかりません。`brew install fzf` でインストールしてください");
@@ -322,19 +358,23 @@ async function interactive() {
   if (selected) console.log(selected.split("\t")[0]); // シェル関数がこれを cd する
 }
 
-function spawnFzf(invoke: string): Deno.ChildProcess {
+function spawnFzf(invoke: string, keyword?: string): Deno.ChildProcess {
+  const header = (keyword ? `[会話に「${keyword}」を含む worktree] ` : "") +
+    "Enter: cd / ctrl-d: 削除 / ctrl-f: 会話内容で絞り込み / ctrl-r: 全件表示";
   return new Deno.Command("fzf", {
     args: [
       "--ansi",
       "--delimiter", "\t",
       "--with-nth", "2,4",
       "--nth", "1,2",
-      "--header", "Enter: cd / ctrl-d: 削除 / ctrl-r: 更新",
-      "--preview", `${invoke} preview {1}`,
+      "--header", header,
+      "--preview", `${invoke} preview {1} {q}`,
       "--preview-window", "right,65%,wrap",
       "--bind", `ctrl-d:execute(${invoke} rm {1})+reload(${invoke} list)`,
+      "--bind", `ctrl-f:reload(${invoke} list {q})+clear-query`,
       "--bind", `ctrl-r:reload(${invoke} list)`,
     ],
+    env: keyword ? { WT_HIGHLIGHT: keyword } : {},
     stdin: "piped",
     stdout: "piped",
     stderr: "inherit",
@@ -355,7 +395,7 @@ function printInit(shell: string) {
 wt() {
   local dest
   dest=$("${exec}" "$@") || return $?
-  if [ $# -eq 0 ] && [ -n "$dest" ] && [ -d "$dest" ]; then
+  if [ -n "$dest" ] && [ -d "$dest" ]; then
     cd "$dest" || return $?
   elif [ -n "$dest" ]; then
     printf '%s\\n' "$dest"
@@ -366,14 +406,14 @@ wt() {
 // ---------- main ----------
 
 // git リポジトリ内かチェック (preview/rm はパス指定なので不要)
-const [cmd, arg] = Deno.args;
+const [cmd, arg, arg2] = Deno.args;
 switch (cmd) {
   case "list":
-    await printList();
+    await printList(arg || undefined);
     break;
   case "preview":
     if (!arg) Deno.exit(1);
-    await printPreview(arg);
+    await printPreview(arg, arg2 || Deno.env.get("WT_HIGHLIGHT") || undefined);
     break;
   case "rm":
     if (!arg) Deno.exit(1);
@@ -386,6 +426,7 @@ switch (cmd) {
     await interactive();
     break;
   default:
-    console.error(`不明なサブコマンド: ${cmd}`);
-    Deno.exit(1);
+    // サブコマンド以外は会話履歴の検索キーワードとして扱う
+    await interactive(cmd);
+    break;
 }
