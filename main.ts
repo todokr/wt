@@ -329,9 +329,13 @@ async function interactive(keyword?: string) {
 
   const invoke = selfInvoke();
 
+  // ctrl-f で指定した検索語をプレビューのハイライトに引き継ぐための状態ファイル
+  const termFile = await Deno.makeTempFile({ prefix: "wt-term-" });
+  if (keyword) await Deno.writeTextFile(termFile, keyword);
+
   let fzf: Deno.ChildProcess;
   try {
-    fzf = spawnFzf(invoke, keyword);
+    fzf = spawnFzf(invoke, termFile, keyword);
   } catch (e) {
     if (e instanceof Deno.errors.NotFound) {
       console.error("fzf が見つかりません。`brew install fzf` でインストールしてください");
@@ -353,12 +357,17 @@ async function interactive(keyword?: string) {
   await writer.close();
 
   const { code, stdout } = await fzf.output();
+  await Deno.remove(termFile).catch(() => {});
   if (code !== 0) Deno.exit(0); // キャンセル
   const selected = new TextDecoder().decode(stdout).trim();
   if (selected) console.log(selected.split("\t")[0]); // シェル関数がこれを cd する
 }
 
-function spawnFzf(invoke: string, keyword?: string): Deno.ChildProcess {
+function spawnFzf(
+  invoke: string,
+  termFile: string,
+  keyword?: string,
+): Deno.ChildProcess {
   const header = (keyword ? `[会話に「${keyword}」を含む worktree] ` : "") +
     "Enter: cd / ctrl-d: 削除 / ctrl-f: 会話内容で絞り込み / ctrl-r: 全件表示";
   return new Deno.Command("fzf", {
@@ -371,10 +380,11 @@ function spawnFzf(invoke: string, keyword?: string): Deno.ChildProcess {
       "--preview", `${invoke} preview {1} {q}`,
       "--preview-window", "right,65%,wrap",
       "--bind", `ctrl-d:execute(${invoke} rm {1})+reload(${invoke} list)`,
-      "--bind", `ctrl-f:reload(${invoke} list {q})+clear-query`,
-      "--bind", `ctrl-r:reload(${invoke} list)`,
+      "--bind",
+      `ctrl-f:execute-silent(${invoke} setterm {q})+reload(${invoke} list {q})+clear-query`,
+      "--bind", `ctrl-r:execute-silent(${invoke} setterm)+reload(${invoke} list)`,
     ],
-    env: keyword ? { WT_HIGHLIGHT: keyword } : {},
+    env: { WT_TERM_FILE: termFile },
     stdin: "piped",
     stdout: "piped",
     stderr: "inherit",
@@ -411,10 +421,24 @@ switch (cmd) {
   case "list":
     await printList(arg || undefined);
     break;
-  case "preview":
+  case "preview": {
     if (!arg) Deno.exit(1);
-    await printPreview(arg, arg2 || Deno.env.get("WT_HIGHLIGHT") || undefined);
+    let term = arg2;
+    if (!term) {
+      const termFile = Deno.env.get("WT_TERM_FILE");
+      if (termFile) {
+        term = await Deno.readTextFile(termFile).catch(() => "");
+      }
+    }
+    await printPreview(arg, (term ?? "").trim() || undefined);
     break;
+  }
+  case "setterm": {
+    // ctrl-f の検索語を状態ファイルへ保存 (引数なしでクリア)
+    const termFile = Deno.env.get("WT_TERM_FILE");
+    if (termFile) await Deno.writeTextFile(termFile, arg ?? "");
+    break;
+  }
   case "rm":
     if (!arg) Deno.exit(1);
     await removeWorktree(arg);
