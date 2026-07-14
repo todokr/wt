@@ -13,8 +13,8 @@ deno compile による単一バイナリで配布するため、利用者に Den
 curl -fsSL https://raw.githubusercontent.com/todokr/wt/main/install.sh | sh
 ```
 
-または Releases ページから自分のプラットフォームのバイナリ（下記）をダウンロードして
-PATH の通った場所に `wt` として置き、`chmod +x`。
+または Releases ページから自分のプラットフォームのバイナリ（対応一覧は「開発・リリース」節を参照）を
+ダウンロードし、PATH の通った場所に `wt` として置いて `chmod +x` する。
 
 セットアップとして `.zshrc` に1行追記:
 
@@ -23,6 +23,20 @@ eval "$(wt init zsh)"
 ```
 
 （cd はシェル関数でしか実現できないため、zoxide などと同じ init 方式を採用。bash は `wt init bash`）
+
+## アンインストール
+
+```sh
+rm ~/.local/bin/wt
+```
+
+（`WT_INSTALL_DIR` を指定してインストールした場合はそのディレクトリの `wt` を削除）
+
+あわせて `.zshrc` に追記した以下の行を削除:
+
+```sh
+eval "$(wt init zsh)"
+```
 
 ## 使い方
 
