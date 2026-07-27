@@ -50,6 +50,86 @@ function claudeProjectDir(worktreePath: string): string {
   return `${home}/.claude/projects/${slug}`;
 }
 
+// ---------- worktree metadata (~/.wt/meta.json) ----------
+
+interface WorktreeMeta {
+  fields: Record<string, string>;
+  updatedAt?: string;
+}
+
+function metaFilePath(): string {
+  return `${Deno.env.get("HOME") ?? ""}/.wt/meta.json`;
+}
+
+async function readAllMeta(): Promise<Record<string, WorktreeMeta>> {
+  try {
+    const text = await Deno.readTextFile(metaFilePath());
+    const obj = JSON.parse(text);
+    if (obj && typeof obj === "object") return obj as Record<string, WorktreeMeta>;
+  } catch {
+    // ファイル無し / パース失敗 → 空
+  }
+  return {};
+}
+
+async function writeAllMeta(all: Record<string, WorktreeMeta>): Promise<void> {
+  const path = metaFilePath();
+  const dir = path.replace(/\/[^/]+$/, "");
+  await Deno.mkdir(dir, { recursive: true }).catch(() => {});
+  await Deno.writeTextFile(path, JSON.stringify(all, null, 2) + "\n");
+}
+
+async function readMeta(path: string): Promise<WorktreeMeta> {
+  const all = await readAllMeta();
+  return all[path] ?? { fields: {} };
+}
+
+async function setField(path: string, key: string, value: string): Promise<void> {
+  const all = await readAllMeta();
+  const entry = all[path] ?? { fields: {} };
+  if (!entry.fields) entry.fields = {};
+  entry.fields[key] = value;
+  entry.updatedAt = new Date().toISOString();
+  all[path] = entry;
+  await writeAllMeta(all);
+}
+
+async function unsetField(path: string, key: string): Promise<void> {
+  const all = await readAllMeta();
+  const entry = all[path];
+  if (!entry || !entry.fields || !(key in entry.fields)) return;
+  delete entry.fields[key];
+  if (Object.keys(entry.fields).length === 0) {
+    delete all[path];
+  } else {
+    entry.updatedAt = new Date().toISOString();
+    all[path] = entry;
+  }
+  await writeAllMeta(all);
+}
+
+async function deleteMeta(path: string): Promise<void> {
+  const all = await readAllMeta();
+  if (!(path in all)) return;
+  delete all[path];
+  await writeAllMeta(all);
+}
+
+// 慣習キーからサマリ 1 行を組み立てる (fzf 一覧の右端表示用)
+function metaSummary(meta: WorktreeMeta | undefined): string {
+  if (!meta || !meta.fields) return "";
+  return meta.fields.status ?? meta.fields.task ?? "";
+}
+
+// preview 表示用の key 並び順: task → status → その他辞書順
+function orderedMetaKeys(fields: Record<string, string>): string[] {
+  const keys = Object.keys(fields);
+  const preferred = ["task", "status"];
+  const head = preferred.filter((k) => k in fields);
+  const rest = keys.filter((k) => !preferred.includes(k)).sort();
+  return [...head, ...rest];
+}
+
 function relativeTime(iso: string): string {
   const then = new Date(iso).getTime();
   if (Number.isNaN(then)) return "";
@@ -67,6 +147,7 @@ interface Worktree {
   branch: string;
   head: string;
   isMain: boolean;
+  meta?: WorktreeMeta;
 }
 
 async function getWorktrees(): Promise<Worktree[]> {
@@ -90,6 +171,8 @@ async function getWorktrees(): Promise<Worktree[]> {
     }
   }
   if (current.path) worktrees.push(current as Worktree);
+  const allMeta = await readAllMeta();
+  for (const w of worktrees) w.meta = allMeta[w.path];
   return worktrees;
 }
 
@@ -117,8 +200,9 @@ async function printList(keyword?: string) {
       ? "~" + wt.path.slice(home.length)
       : wt.path;
     const mark = wt.isMain ? " [main]" : "";
+    const summary = truncate(metaSummary(wt.meta), 40);
     console.log(
-      `${wt.path}\t${wt.branch ?? "?"}${mark}\t${wt.head ?? ""}\t${display}`,
+      `${wt.path}\t${wt.branch ?? "?"}${mark}\t${wt.head ?? ""}\t${display}\t${summary}`,
     );
   }
 }
@@ -249,6 +333,22 @@ async function printPreview(worktreePath: string, term?: string) {
   );
   console.log(`${cyan}branch:${reset} ${branch || "(detached)"}`);
   console.log(`${cyan}commit:${reset} ${lastCommit}`);
+
+  const meta = await readMeta(worktreePath);
+  const metaKeys = orderedMetaKeys(meta.fields ?? {});
+  if (metaKeys.length === 0) {
+    console.log(`${dim}meta:   (未設定 — wt set <key> <value> で登録)${reset}`);
+  } else {
+    const pad = Math.max(...metaKeys.map((k) => k.length), 6);
+    for (const k of metaKeys) {
+      const label = `${k}:`.padEnd(pad + 1);
+      console.log(`${cyan}${label}${reset} ${truncate(meta.fields[k], 200)}`);
+    }
+    if (meta.updatedAt) {
+      console.log(`${dim}        (更新 ${relativeTime(meta.updatedAt)})${reset}`);
+    }
+  }
+
   if (status) {
     const lines = status.split("\n");
     console.log(`${cyan}dirty:${reset}  ${lines.length} files`);
@@ -336,13 +436,16 @@ async function removeWorktree(worktreePath: string) {
     stdout: "inherit",
     stderr: "piped",
   }).output();
-  if (result.code !== 0) {
+  if (result.code === 0) {
+    await deleteMeta(worktreePath);
+  } else {
     const err = new TextDecoder().decode(result.stderr);
     console.error(err.trim());
     if (/contains modified or untracked files/.test(err)) {
       const force = prompt("未コミットの変更があります。強制削除しますか？ [y/N]");
       if (force?.toLowerCase() === "y") {
         await run(["git", "worktree", "remove", "--force", worktreePath]);
+        await deleteMeta(worktreePath);
         console.error("強制削除しました");
       }
     } else {
@@ -390,7 +493,8 @@ async function interactive(keyword?: string) {
       ? "~" + wt.path.slice(home.length)
       : wt.path;
     const mark = wt.isMain ? " [main]" : "";
-    return `${wt.path}\t${wt.branch ?? "?"}${mark}\t${wt.head ?? ""}\t${display}`;
+    const summary = truncate(metaSummary(wt.meta), 40);
+    return `${wt.path}\t${wt.branch ?? "?"}${mark}\t${wt.head ?? ""}\t${display}\t${summary}`;
   });
   const writer = fzf.stdin.getWriter();
   await writer.write(new TextEncoder().encode(lines.join("\n") + "\n"));
@@ -414,8 +518,8 @@ function spawnFzf(
     args: [
       "--ansi",
       "--delimiter", "\t",
-      "--with-nth", "2,4",
-      "--nth", "1,2",
+      "--with-nth", "2,4,5",
+      "--nth", "1,2,5",
       "--header", header,
       "--preview", `${invoke} preview {1} {q}`,
       "--preview-window", "right,65%,wrap",
@@ -453,6 +557,156 @@ wt() {
 }`);
 }
 
+// ---------- meta subcommands ----------
+
+// 引数から --path <p> / --json / --all フラグと位置引数を分離
+function parseArgs(
+  args: string[],
+): { positional: string[]; flags: { json: boolean; all: boolean; path?: string } } {
+  const positional: string[] = [];
+  const flags: { json: boolean; all: boolean; path?: string } = {
+    json: false,
+    all: false,
+  };
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--json") flags.json = true;
+    else if (a === "--all") flags.all = true;
+    else if (a === "--path") flags.path = args[++i];
+    else if (a.startsWith("--path=")) flags.path = a.slice("--path=".length);
+    else positional.push(a);
+  }
+  return { positional, flags };
+}
+
+async function resolveWorktreePath(explicit?: string): Promise<string> {
+  if (explicit) return explicit;
+  const top = await run(["git", "rev-parse", "--show-toplevel"], {
+    allowFail: true,
+  });
+  if (!top) {
+    console.error("git worktree 内で実行するか --path で指定してください");
+    Deno.exit(1);
+  }
+  return top;
+}
+
+async function cmdSet(args: string[]) {
+  const { positional, flags } = parseArgs(args);
+  const [key, ...valueParts] = positional;
+  if (!key || valueParts.length === 0) {
+    console.error("使い方: wt set <key> <value...> [--path <p>]");
+    Deno.exit(1);
+  }
+  const path = await resolveWorktreePath(flags.path);
+  await setField(path, key, valueParts.join(" "));
+}
+
+async function cmdUnset(args: string[]) {
+  const { positional, flags } = parseArgs(args);
+  const [key] = positional;
+  if (!key) {
+    console.error("使い方: wt unset <key> [--path <p>]");
+    Deno.exit(1);
+  }
+  const path = await resolveWorktreePath(flags.path);
+  await unsetField(path, key);
+}
+
+async function cmdGet(args: string[]) {
+  const { positional, flags } = parseArgs(args);
+  const [key] = positional;
+  if (!key) {
+    console.error("使い方: wt get <key> [--path <p>]");
+    Deno.exit(1);
+  }
+  const path = await resolveWorktreePath(flags.path);
+  const meta = await readMeta(path);
+  const val = meta.fields?.[key];
+  if (val === undefined) Deno.exit(1);
+  console.log(val);
+}
+
+async function cmdClear(args: string[]) {
+  const { flags } = parseArgs(args);
+  const path = await resolveWorktreePath(flags.path);
+  await deleteMeta(path);
+}
+
+interface InfoRecord {
+  path: string;
+  branch: string;
+  head: string;
+  isMain: boolean;
+  fields: Record<string, string>;
+  updatedAt?: string;
+  dirty: number;
+}
+
+async function buildInfo(wt: Worktree): Promise<InfoRecord> {
+  const status = await run(
+    ["git", "-C", wt.path, "status", "--short"],
+    { allowFail: true },
+  );
+  const dirty = status ? status.split("\n").length : 0;
+  return {
+    path: wt.path,
+    branch: wt.branch,
+    head: wt.head,
+    isMain: wt.isMain,
+    fields: wt.meta?.fields ?? {},
+    updatedAt: wt.meta?.updatedAt,
+    dirty,
+  };
+}
+
+function printInfoHuman(rec: InfoRecord) {
+  const bold = "\x1b[1m", dim = "\x1b[2m", cyan = "\x1b[36m", reset = "\x1b[0m";
+  console.log(`${bold}${rec.path}${reset}`);
+  console.log(`${cyan}branch:${reset} ${rec.branch || "(detached)"}${rec.isMain ? " [main]" : ""}`);
+  console.log(`${cyan}head:${reset}   ${rec.head}`);
+  console.log(`${cyan}dirty:${reset}  ${rec.dirty} files`);
+  const keys = orderedMetaKeys(rec.fields);
+  if (keys.length === 0) {
+    console.log(`${dim}meta:   (未設定 — wt set <key> <value> で登録)${reset}`);
+  } else {
+    const pad = Math.max(...keys.map((k) => k.length), 6);
+    for (const k of keys) {
+      console.log(`${cyan}${(k + ":").padEnd(pad + 1)}${reset} ${rec.fields[k]}`);
+    }
+    if (rec.updatedAt) {
+      console.log(`${dim}        (更新 ${relativeTime(rec.updatedAt)})${reset}`);
+    }
+  }
+}
+
+async function cmdInfo(args: string[]) {
+  const { positional, flags } = parseArgs(args);
+  if (flags.all) {
+    const worktrees = await getWorktrees();
+    const records = await Promise.all(worktrees.map(buildInfo));
+    if (flags.json) {
+      console.log(JSON.stringify(records, null, 2));
+    } else {
+      for (const rec of records) {
+        printInfoHuman(rec);
+        console.log("");
+      }
+    }
+    return;
+  }
+  const path = await resolveWorktreePath(flags.path ?? positional[0]);
+  const worktrees = await getWorktrees();
+  const wt = worktrees.find((w) => w.path === path);
+  if (!wt) {
+    console.error(`worktree が見つかりません: ${path}`);
+    Deno.exit(1);
+  }
+  const rec = await buildInfo(wt);
+  if (flags.json) console.log(JSON.stringify(rec, null, 2));
+  else printInfoHuman(rec);
+}
+
 // ---------- main ----------
 
 // git リポジトリ内かチェック (preview/rm はパス指定なので不要)
@@ -485,6 +739,21 @@ switch (cmd) {
     break;
   case "init":
     printInit(arg ?? "zsh");
+    break;
+  case "set":
+    await cmdSet(Deno.args.slice(1));
+    break;
+  case "unset":
+    await cmdUnset(Deno.args.slice(1));
+    break;
+  case "get":
+    await cmdGet(Deno.args.slice(1));
+    break;
+  case "clear":
+    await cmdClear(Deno.args.slice(1));
+    break;
+  case "info":
+    await cmdInfo(Deno.args.slice(1));
     break;
   case undefined:
     await interactive();

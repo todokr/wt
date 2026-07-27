@@ -61,20 +61,48 @@ fzf が起動し、カレントリポジトリの worktree 一覧が表示され
 
 プレビューには以下が表示される:
 
-- branch / 最新コミット / dirty 状態
+- branch / 最新コミット
+- **worktree メタ情報** — `wt set` で登録した任意の key/value（`task` / `status` など）
+- dirty 状態
 - **Claude への指示** — そのパスで Claude Code に送った直近のプロンプト（最大 8 件）
 - **実行されたコマンド** — Claude が実行した直近の Bash コマンド（最大 8 件）
+
+### worktree メタ情報
+
+各 worktree に任意の key/value を登録できる。fzf の一覧・プレビューに表示され、LLM (Claude Code など)
+から `wt info --json` で機械的に読める。保存先は `~/.wt/meta.json`。
+
+```sh
+wt set <key> <value...>   # 任意のキーに値をセット (例: wt set task "…" / wt set status "…")
+wt unset <key>            # 指定キーを削除
+wt get <key>              # 単一 key の値を stdout に出力 (存在しなければ exit 1)
+wt clear                  # 現在の worktree のメタ全体を削除
+wt info                   # 現在の worktree の情報を表示
+wt info --json            # 同上を JSON で
+wt info <path>            # 指定パスの情報
+wt info --all --json      # 全 worktree 分をまとめて JSON 出力
+```
+
+書き込み系は cwd を自動判定する。別の worktree を対象にしたい場合は `--path <p>` を付ける。
+
+**慣習キー** — 以下は `wt` 自身が fzf 一覧の要約列 / preview の上部で参照する:
+
+- `task` — その worktree で行っている作業の 1 行サマリ
+- `status` — 現在の進捗ステータス
+
+それ以外 (`pr` / `ticket` / `notes` など) も自由に登録でき、`wt info` で全部表示される。
 
 ### サブコマンド
 
 ```sh
-wt list [キーワード]         # worktree 一覧を TSV 出力 (キーワードで会話内容フィルタ)
+wt list [キーワード]           # worktree 一覧を TSV 出力 (キーワードで会話内容フィルタ)
 wt preview <path> [キーワード] # 指定 worktree のプレビューを出力
-wt rm <path>                 # 指定 worktree を削除
-wt init zsh|bash             # cd 連携用シェル関数を出力
+wt rm <path>                   # 指定 worktree を削除 (~/.wt/meta.json の該当エントリも削除)
+wt init zsh|bash               # cd 連携用シェル関数を出力
 ```
 
-※ サブコマンド名 (`list` / `preview` / `rm` / `init`) と同名のキーワードでは検索できない。
+※ サブコマンド名 (`list` / `preview` / `rm` / `init` / `set` / `unset` / `get` / `clear` / `info`)
+と同名のキーワードでは検索できない。
 
 ## 開発・リリース（メンテナ向け）
 
