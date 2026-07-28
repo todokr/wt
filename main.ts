@@ -525,7 +525,7 @@ function spawnFzf(
       "--nth", "1,2,5",
       "--header", header,
       "--preview", `${invoke} preview {1} {q}`,
-      "--preview-window", "right,65%,wrap",
+      "--preview-window", "up,60%,wrap",
       "--bind", `ctrl-d:execute(${invoke} rm {1})+reload(${invoke} list)`,
       "--bind",
       `ctrl-f:execute-silent(${invoke} setterm {q})+reload(${invoke} list {q})+clear-query`,

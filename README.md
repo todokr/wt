@@ -152,8 +152,12 @@ deno task build:all  # 配布用に3ターゲットをクロスコンパイル
 3. `scripts/gen-homebrew-formula.sh` で Formula を生成し `todokr/homebrew-tap` に push
 
 ```sh
-git tag v0.3.0 && git push origin v0.3.0
+scripts/release.sh 0.3.1
 ```
+
+`scripts/release.sh` は事前チェック (main / clean tree / origin 同期 / tag 未使用) と
+確認プロンプトを経てから tag 作成 + push を行う。手動で行う場合は
+`git tag v0.3.1 && git push origin v0.3.1` でも同じ。
 
 初回セットアップ（一度だけ）:
 
