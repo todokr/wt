@@ -8,6 +8,14 @@ deno compile による単一バイナリで配布するため、利用者に Den
 
 ## インストール（利用者向け）
 
+### Homebrew (macOS / Linux)
+
+```sh
+brew install todokr/tap/wt
+```
+
+### install.sh
+
 ```sh
 # GitHub Releases から取得 (private リポジトリなら gh CLI 認証済み環境で)
 curl -fsSL https://raw.githubusercontent.com/todokr/wt/main/install.sh | sh
@@ -92,16 +100,31 @@ wt info --all --json      # 全 worktree 分をまとめて JSON 出力
 
 それ以外 (`pr` / `ticket` / `notes` など) も自由に登録でき、`wt info` で全部表示される。
 
+### worktree の新規作成
+
+```sh
+wt new <branch> [<base>] [-m "task メッセージ"] [--dir <slug>]
+```
+
+- ブランチ `<branch>` と worktree を新規作成し、その worktree に自動で cd する
+- `<branch>` が既存の場合はそれを流用（`-b` を付けない。この場合 `<base>` は指定不可）
+- 分岐元 `<base>` を省略すると `main` (無ければ `master` / `origin/HEAD`) から分岐
+- `-m` (または `--message`) で作成と同時に `task` メタを登録
+- `--dir <slug>` でディレクトリ basename をブランチ名と別に指定可（`feature/foo` を `feature-foo` にする等）
+- 配置先はデフォルトで `<メイン worktree>/.worktree/<slug または branch>`
+- 環境変数 `WT_BASE_DIR` を設定すると、代わりに `${WT_BASE_DIR}/<slug または branch>` に作成される
+
 ### サブコマンド
 
 ```sh
 wt list [キーワード]           # worktree 一覧を TSV 出力 (キーワードで会話内容フィルタ)
 wt preview <path> [キーワード] # 指定 worktree のプレビューを出力
 wt rm <path>                   # 指定 worktree を削除 (~/.wt/meta.json の該当エントリも削除)
+wt new <name> [<base>] [-m "..."] # ブランチ + worktree を新規作成して cd
 wt init zsh|bash               # cd 連携用シェル関数を出力
 ```
 
-※ サブコマンド名 (`list` / `preview` / `rm` / `init` / `set` / `unset` / `get` / `clear` / `info`)
+※ サブコマンド名 (`list` / `preview` / `rm` / `new` / `init` / `set` / `unset` / `get` / `clear` / `info`)
 と同名のキーワードでは検索できない。
 
 ## 開発・リリース（メンテナ向け）
@@ -122,9 +145,28 @@ deno task build:all  # 配布用に3ターゲットをクロスコンパイル
 
 リリース手順:
 
+タグを push するだけで、`.github/workflows/release.yml` が以下を自動実行する:
+
+1. `deno task build:all` で 3 ターゲットビルド
+2. GitHub Release を作成しバイナリを添付
+3. `scripts/gen-homebrew-formula.sh` で Formula を生成し `todokr/homebrew-tap` に push
+
+```sh
+git tag v0.3.0 && git push origin v0.3.0
+```
+
+初回セットアップ（一度だけ）:
+
+- 別リポ `todokr/homebrew-tap` を作成（空でよい。CI が `Formula/` を作る）
+- `repo` スコープの PAT を発行し、この repo の Actions secret `HOMEBREW_TAP_TOKEN` に登録
+
+手動でリリースする場合:
+
 ```sh
 deno task build:all
-gh release create v0.1.0 dist/wt-* --title "v0.1.0" --generate-notes
+gh release create v0.3.0 dist/wt-* --title "v0.3.0" --generate-notes
+./scripts/gen-homebrew-formula.sh 0.3.0 dist > /path/to/tap/Formula/wt.rb
+# → tap リポで commit + push
 ```
 
 ## 仕組み

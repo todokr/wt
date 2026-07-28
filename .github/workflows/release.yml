@@ -1,0 +1,60 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # gh release create 用
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: build (all targets)
+        run: deno task build:all
+
+      - name: extract version from tag
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            dist/wt-aarch64-apple-darwin \
+            dist/wt-x86_64-apple-darwin \
+            dist/wt-x86_64-unknown-linux-gnu
+
+      - name: generate Homebrew formula
+        run: |
+          ./scripts/gen-homebrew-formula.sh "${{ steps.ver.outputs.version }}" dist > /tmp/wt.rb
+          cat /tmp/wt.rb
+
+      - name: push formula to homebrew-tap
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/todokr/homebrew-tap.git" /tmp/tap
+          mkdir -p /tmp/tap/Formula
+          cp /tmp/wt.rb /tmp/tap/Formula/wt.rb
+          cd /tmp/tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/wt.rb
+          if git diff --cached --quiet; then
+            echo "No formula change; skip commit."
+          else
+            git commit -m "wt: bump to ${{ steps.ver.outputs.version }}"
+            git push origin HEAD
+          fi

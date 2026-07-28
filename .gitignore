@@ -1,1 +1,3 @@
 dist/
+.claude/settings.local.json
+.worktree/

@@ -6,6 +6,9 @@
 //   wt list [kw]    worktree 一覧を TSV で出力 (内部用: fzf の reload にも使う)
 //   wt preview <p>  worktree のプレビュー (git 状態 + Claude Code 履歴) を出力 (内部用)
 //   wt rm <p>       worktree を削除 (確認プロンプトあり)
+//   wt new <branch> [<base>] [-m "task"] [--dir <slug>]
+//                  ブランチ + worktree を新規作成して cd (base 省略時は main)
+//                  既存ブランチは流用。--dir でディレクトリ名を分離指定できる
 //   wt init zsh     cd 連携用のシェル関数を出力 (.zshrc で eval する)
 //
 // cd 連携はシェル関数ラッパー (`wt init zsh` が出力) 経由で行う。
@@ -559,21 +562,38 @@ wt() {
 
 // ---------- meta subcommands ----------
 
-// 引数から --path <p> / --json / --all フラグと位置引数を分離
+// 引数から --path <p> / --json / --all / -m|--message <s> フラグと位置引数を分離
 function parseArgs(
   args: string[],
-): { positional: string[]; flags: { json: boolean; all: boolean; path?: string } } {
-  const positional: string[] = [];
-  const flags: { json: boolean; all: boolean; path?: string } = {
-    json: false,
-    all: false,
+): {
+  positional: string[];
+  flags: {
+    json: boolean;
+    all: boolean;
+    path?: string;
+    message?: string;
+    dir?: string;
   };
+} {
+  const positional: string[] = [];
+  const flags: {
+    json: boolean;
+    all: boolean;
+    path?: string;
+    message?: string;
+    dir?: string;
+  } = { json: false, all: false };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === "--json") flags.json = true;
     else if (a === "--all") flags.all = true;
     else if (a === "--path") flags.path = args[++i];
     else if (a.startsWith("--path=")) flags.path = a.slice("--path=".length);
+    else if (a === "-m" || a === "--message") flags.message = args[++i];
+    else if (a.startsWith("--message=")) {
+      flags.message = a.slice("--message=".length);
+    } else if (a === "--dir") flags.dir = args[++i];
+    else if (a.startsWith("--dir=")) flags.dir = a.slice("--dir=".length);
     else positional.push(a);
   }
   return { positional, flags };
@@ -707,6 +727,112 @@ async function cmdInfo(args: string[]) {
   else printInfoHuman(rec);
 }
 
+// ---------- new (worktree + branch 作成) ----------
+
+// メイン (最初の) worktree の絶対パスを返す
+async function getMainWorktreePath(): Promise<string> {
+  const out = await run(["git", "worktree", "list", "--porcelain"], {
+    allowFail: true,
+  });
+  for (const line of out.split("\n")) {
+    if (line.startsWith("worktree ")) return line.slice(9);
+  }
+  throw new Error("git worktree が見つかりません");
+}
+
+// 新規 worktree の配置先ディレクトリを決定
+// - $WT_BASE_DIR があれば ${WT_BASE_DIR}/${name}
+// - それ以外はメイン worktree 直下の worktrees/${name}
+function resolveNewWorktreePath(name: string, mainPath: string): string {
+  const base = Deno.env.get("WT_BASE_DIR");
+  if (base && base.length > 0) return `${base.replace(/\/$/, "")}/${name}`;
+  return `${mainPath}/.worktree/${name}`;
+}
+
+// base 引数省略時のデフォルト分岐元を決定
+async function resolveDefaultBase(mainPath: string): Promise<string> {
+  for (const cand of ["main", "master"]) {
+    const ok = await run(
+      ["git", "-C", mainPath, "rev-parse", "--verify", "--quiet", cand],
+      { allowFail: true },
+    );
+    if (ok) return cand;
+  }
+  const head = await run(
+    ["git", "-C", mainPath, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    { allowFail: true },
+  );
+  if (head) return head; // 例: "origin/main"
+  throw new Error(
+    "デフォルト分岐元が見つかりません (main / master / origin/HEAD いずれも無し)。base を明示指定してください",
+  );
+}
+
+async function cmdNew(args: string[]) {
+  const { positional, flags } = parseArgs(args);
+  const [name, baseArg] = positional;
+  if (!name) {
+    console.error(
+      '使い方: wt new <branch> [<base>] [-m "task"] [--dir <slug>]',
+    );
+    Deno.exit(1);
+  }
+
+  const mainPath = await getMainWorktreePath();
+  const dirName = flags.dir ?? name;
+  const targetPath = resolveNewWorktreePath(dirName, mainPath);
+
+  // 既存 dir チェック（git worktree add でも失敗するが、事前に分かりやすいメッセージで落とす）
+  try {
+    const info = await Deno.stat(targetPath);
+    if (info.isDirectory) {
+      console.error(`既にディレクトリが存在します: ${targetPath}`);
+      Deno.exit(1);
+    }
+  } catch { /* 存在しない → OK */ }
+
+  // ブランチが既存なら流用 (git worktree add <path> <branch>)、無ければ新規 (-b <branch> <path> <base>)
+  const branchExists = await run(
+    ["git", "-C", mainPath, "rev-parse", "--verify", "--quiet", `refs/heads/${name}`],
+    { allowFail: true },
+  );
+
+  let gitArgs: string[];
+  if (branchExists) {
+    if (baseArg) {
+      console.error(
+        `ブランチ ${name} は既存です。base 引数は新規ブランチ作成時のみ指定できます`,
+      );
+      Deno.exit(1);
+    }
+    gitArgs = ["-C", mainPath, "worktree", "add", targetPath, name];
+  } else {
+    const base = baseArg ?? (await resolveDefaultBase(mainPath));
+    gitArgs = ["-C", mainPath, "worktree", "add", "-b", name, targetPath, base];
+  }
+
+  const result = await new Deno.Command("git", {
+    args: gitArgs,
+    stdout: "inherit",
+    stderr: "inherit",
+  }).output();
+  if (result.code !== 0) Deno.exit(result.code);
+
+  // 作成された worktree の絶対パスを取り直す (シンボリックリンク解決など)
+  const absPath = await run(
+    ["git", "-C", targetPath, "rev-parse", "--show-toplevel"],
+    { allowFail: true },
+  );
+  const finalPath = absPath || targetPath;
+
+  if (flags.message) {
+    await setField(finalPath, "task", flags.message);
+  }
+
+  // シェル関数が cd するために path を stdout に出す
+  console.log(finalPath);
+}
+
 // ---------- main ----------
 
 // git リポジトリ内かチェック (preview/rm はパス指定なので不要)
@@ -754,6 +880,9 @@ switch (cmd) {
     break;
   case "info":
     await cmdInfo(Deno.args.slice(1));
+    break;
+  case "new":
+    await cmdNew(Deno.args.slice(1));
     break;
   case undefined:
     await interactive();
