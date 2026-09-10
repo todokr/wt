@@ -417,6 +417,24 @@ async function printPreview(worktreePath: string, term?: string) {
 
 // ---------- rm ----------
 
+// ディレクトリは残っているが .git を失った worktree か。
+// git の stderr は locale で翻訳されるためメッセージでは判定しない。
+async function isBrokenWorktreeDir(path: string): Promise<boolean> {
+  let info: Deno.FileInfo;
+  try {
+    info = await Deno.lstat(path);
+  } catch {
+    return false;
+  }
+  if (!info.isDirectory || info.isSymlink) return false; // symlink は再帰削除しない
+  try {
+    await Deno.stat(`${path}/.git`);
+    return false;
+  } catch (e) {
+    return e instanceof Deno.errors.NotFound;
+  }
+}
+
 async function removeWorktree(worktreePath: string) {
   const worktrees = await getWorktrees();
   const target = worktrees.find((w) => w.path === worktreePath);
@@ -451,6 +469,59 @@ async function removeWorktree(worktreePath: string) {
         await deleteMeta(worktreePath);
         console.error("強制削除しました");
       }
+    } else if (await isBrokenWorktreeDir(worktreePath)) {
+      // .git を失った worktree は --force でも消せない
+      const mainPath = worktrees.find((w) => w.isMain)?.path;
+      if (!mainPath) {
+        console.error("メイン worktree が特定できません");
+        prompt("Enter で戻る");
+        return;
+      }
+      console.error(
+        `${worktreePath}/.git が失われているため、ディレクトリごと削除します (未コミットの変更は復元できません)`,
+      );
+      // cwd が消えると Deno は子プロセスを spawn できなくなるので先に退避する
+      Deno.chdir(mainPath);
+      try {
+        await Deno.remove(worktreePath, { recursive: true });
+      } catch (e) {
+        console.error(
+          `ディレクトリの削除に失敗しました: ${
+            e instanceof Error ? e.message : e
+          }`,
+        );
+        console.error("手動で削除してから再実行してください");
+        prompt("Enter で戻る");
+        return;
+      }
+      const retry = await new Deno.Command("git", {
+        args: ["-C", mainPath, "worktree", "remove", worktreePath],
+        stdout: "inherit",
+        stderr: "piped",
+      }).output();
+      let unregistered = retry.code === 0;
+      if (!unregistered) {
+        console.error(new TextDecoder().decode(retry.stderr).trim());
+        console.error(
+          "git worktree prune で登録を掃除します (このリポジトリの他の壊れたエントリも一覧から消えます)",
+        );
+        await run(["git", "-C", mainPath, "worktree", "prune"], {
+          allowFail: true,
+        });
+        // prune は lock 済み worktree を飛ばすため実際に消えたか確認する
+        const listed = await run(
+          ["git", "-C", mainPath, "worktree", "list", "--porcelain"],
+          { allowFail: true },
+        );
+        unregistered = !listed.split("\n").includes(`worktree ${worktreePath}`);
+      }
+      await deleteMeta(worktreePath);
+      console.error(
+        unregistered
+          ? "ディレクトリごと削除しました"
+          : `ディレクトリは削除しましたが git の登録が残っています。git -C ${mainPath} worktree unlock ${worktreePath} の後に再実行してください`,
+      );
+      prompt("Enter で戻る");
     } else {
       prompt("Enter で戻る");
     }
